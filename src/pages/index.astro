@@ -1,0 +1,114 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+
+const posts = (await getCollection('blog'))
+  .filter((post) => !post.data.draft)
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+---
+
+<BaseLayout title="Yahor Bezzubau — Blog">
+  <section class="hero">
+    <h1>Hey, I'm <span class="accent">Yahor</span></h1>
+    <p class="hero-sub">Staff Engineer at JetBrains. Writing about AI agents, TypeScript, Go, and the things nobody else is talking about.</p>
+  </section>
+
+  <section class="posts">
+    <h2 class="section-title">Posts</h2>
+    {posts.length === 0 && <p>No posts yet. Check back soon.</p>}
+    <ul class="post-list">
+      {posts.map((post) => (
+        <li class="post-item">
+          <a href={`/blog/${post.slug}/`}>
+            <div class="post-item-meta">
+              <time class="date" datetime={post.data.pubDate.toISOString()}>
+                {post.data.pubDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+              </time>
+              <div class="post-item-tags">
+                {post.data.tags.slice(0, 3).map((tag) => (
+                  <span class="tag">{tag}</span>
+                ))}
+              </div>
+            </div>
+            <h3 class="post-item-title">{post.data.title}</h3>
+            <p class="post-item-desc">{post.data.description}</p>
+          </a>
+        </li>
+      ))}
+    </ul>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding: 2rem 0 3rem;
+  }
+
+  .hero h1 {
+    font-size: 2.5rem;
+    letter-spacing: -0.03em;
+  }
+
+  .accent { color: var(--blue); }
+
+  .hero-sub {
+    font-size: 1.15rem;
+    color: var(--muted);
+    max-width: 540px;
+    margin-top: 0.75rem;
+  }
+
+  .section-title {
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--dim);
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+  }
+
+  .post-list {
+    list-style: none;
+    padding: 0;
+  }
+
+  .post-item {
+    margin-bottom: 0;
+  }
+
+  .post-item a {
+    display: block;
+    padding: 1.25rem 1rem;
+    border-radius: 8px;
+    transition: background 0.2s;
+  }
+
+  .post-item a:hover {
+    background: var(--bg-card);
+    opacity: 1;
+  }
+
+  .post-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .post-item-tags {
+    display: flex;
+    gap: 0.35rem;
+  }
+
+  .post-item-title {
+    font-size: 1.25rem;
+    color: var(--text);
+    margin: 0;
+  }
+
+  .post-item-desc {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin: 0.35rem 0 0;
+  }
+</style>

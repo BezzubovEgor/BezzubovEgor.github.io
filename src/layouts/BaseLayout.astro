@@ -1,0 +1,114 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'Yahor Bezzubau — writing about AI agents, TypeScript, Go, and platform engineering.' } = Astro.props;
+const currentPath = Astro.url.pathname;
+---
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content={description} />
+  <meta name="author" content="Yahor Bezzubau" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+  <link rel="sitemap" href="/sitemap-index.xml" />
+  <meta property="og:title" content={title} />
+  <meta property="og:description" content={description} />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary" />
+  <title>{title}</title>
+</head>
+<body>
+  <header>
+    <nav class="container-wide">
+      <div class="nav-inner">
+        <a href="/" class="logo">yahor<span class="logo-dot">.</span>dev</a>
+        <div class="nav-links">
+          <a href="/" class:list={[{ active: currentPath === '/' }]}>Posts</a>
+          <a href="/about" class:list={[{ active: currentPath === '/about/' || currentPath === '/about' }]}>About</a>
+          <a href="https://github.com/BezzubovEgor" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </nav>
+  </header>
+
+  <main class="container">
+    <slot />
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>&copy; {new Date().getFullYear()} Yahor Bezzubau. Built with <a href="https://astro.build" target="_blank">Astro</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>
+
+<style>
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 1rem 0;
+    position: sticky;
+    top: 0;
+    background: rgba(10, 14, 26, 0.85);
+    backdrop-filter: blur(12px);
+    z-index: 10;
+  }
+
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logo {
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .logo-dot { color: var(--blue); }
+
+  .nav-links {
+    display: flex;
+    gap: 1.5rem;
+  }
+
+  .nav-links a {
+    font-size: 0.9rem;
+    color: var(--muted);
+    font-weight: 500;
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover, .nav-links a.active {
+    color: var(--text);
+    opacity: 1;
+  }
+
+  main {
+    flex: 1;
+    padding-top: 2.5rem;
+    padding-bottom: 4rem;
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 0;
+    text-align: center;
+  }
+
+  footer p {
+    font-size: 0.8rem;
+    color: var(--dim);
+    margin: 0;
+  }
+</style>
