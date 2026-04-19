@@ -1,94 +1,127 @@
 ---
-title: "What I've Learned Building with AI Agents in 2026"
-description: "The interesting problems in AI agents aren't about generating code. They're about runtime, data, permissions, and context. Notes from the trenches at JetBrains."
-pubDate: 2026-04-13
-tags: ["ai-agents", "architecture", "typescript"]
+title: "Building AI Agents That Don't Fall Apart: A Year in the Async Runtime Trenches"
+description: "The industry obsesses over which model to use. The actual engineering challenge — async tool dispatch, cancellation, state correlation — is where agents succeed or fail in production."
+pubDate: 2026-04-15
+author: "Yahor Bezzubau"
+tags: ["ai", "agents", "architecture", "llm", "runtime"]
 ---
 
-Everyone's talking about AI agents. Most of the conversation is about the wrong things.
+Our AI agent was hallucinating tool call IDs at a 5% rate, and it took us three weeks to figure out why. The model was fine. Prompts were fine. The issue was a 36-character UUID that the model couldn't reliably hold in working memory across async turns. We replaced it with sequential integers. Problem solved.
 
-The hype cycle right now is: "look, this agent wrote an entire app!" or "Claude Code just solved my LeetCode hard!" That's impressive, sure. But after spending months building agent infrastructure at JetBrains, I can tell you — the code generation part is the *easy* problem. The hard problems are everything that happens around it.
+That bug was one of maybe a dozen moments over the past year where I realized: **the runtime is the hard part.** Not the model, not the prompts, not the tool definitions. The execution layer — the thing that dispatches tool calls, tracks their lifecycle, handles results arriving out of order, and deals with cancellation — is where AI agents actually succeed or fail in production.
 
-## The real bottleneck isn't intelligence — it's runtime
+I've been building this layer full-time: the async runtime that sits between the LLM and the outside world. The industry mostly talks about model capabilities, reasoning benchmarks, prompt engineering. What actually trips you up is concurrency, state management, and observability. Here's what I learned.
 
-Here's something I didn't expect: the moment you give an agent the ability to not just generate code but actually *do things* — store data, call APIs, manage state — you discover that we have almost zero infrastructure for this.
+## The runtime is the event loop
 
-Think about it. A human developer has:
-- A database with schemas, migrations, and access control
-- Environment variables and secrets management
-- CI/CD pipelines with rollback
-- Monitoring and alerting
-- Authentication and authorization at every layer
-
-An AI agent has... a context window and a prayer.
-
-When we started thinking about what agents actually need at Kineto, we kept coming back to the same gap: there's no "operating system" for agents. No standardized way for an agent to say "I need to store this data, with this schema, and only allow these other agents to read it."
-
-## The TypeScript observation
-
-Here's a concrete architectural thing I've noticed. TypeScript's type system is accidentally perfect for agent-native data.
-
-When you define a Zod schema or a TypeScript interface, you're essentially creating a machine-readable contract. Agents can parse these. They can validate against them. They can even *generate* them from natural language descriptions.
+The mental model that finally clicked: the **runtime is the event loop**, and the **LLM is a coroutine**. The model yields tool calls like a generator yields values. The runtime dispatches them, manages their lifecycle, and resumes the model when results arrive.
 
 ```typescript
-// This isn't just a type — it's a contract agents can reason about
-const BookClubSchema = z.object({
-  members: z.array(z.object({
-    name: z.string(),
-    role: z.enum(['admin', 'member', 'guest']),
-  })),
-  currentBook: z.object({
-    title: z.string(),
-    votes: z.number().min(0),
-  }),
-});
+// 🚫 Synchronous: blocks until ALL tools complete
+while (!done) {
+  const { text, toolCalls } = await model.generate(context);
+  const results = await runtime.dispatch(toolCalls); // model sits idle here
+  context.append(results);
+}
+
+// ✅ Async: model keeps working while tools execute
+while (!done) {
+  const { text, toolCalls } = await model.generate(context);
+  runtime.dispatchAsync(toolCalls); // fire and continue
+  context.appendPending(toolCalls.map(tc => tc.id));
+  // results injected into context as they arrive
+}
 ```
 
-But here's the non-obvious part: the schema alone isn't enough. An agent needs to know not just the *shape* of data, but the *rules*. What happens when `votes` exceeds a threshold? Who's allowed to modify `currentBook`? What events should be triggered when a new member joins?
+That synchronous `await` is where most agent frameworks stop. The model calls a tool, the runtime executes it, everything blocks until the result comes back. Clean, correct, and completely inadequate once your tools do anything interesting.
 
-This is where most frameworks fall apart. LangChain gives you chains. CrewAI gives you crews. But nobody gives you **data objects with embedded logic, permissions, and event hooks that agents can discover and interact with programmatically.**
+A web search takes 2 seconds. A code sandbox takes 10. A file upload takes... who knows. The model sits idle while users stare at a spinner. After switching to async dispatch, agents that ran multiple tools per turn went from sequential latency (sum of all tool times) to parallel latency (max of all tool times). For a typical multi-tool query, that's the difference between 12 seconds and 3.
 
-## Permissions are the unsexy killer feature
+Going async fixes the latency problem. It also creates four new ones.
 
-Nobody wants to talk about permissions. It's not a demo-worthy feature. But it's the thing that makes the difference between a toy and a production system.
+## Problem 1: State correlation (or, why UUIDs break)
 
-Consider: you have a personal finance agent. It can read your transactions, categorize spending, and suggest budgets. Great. Now your partner wants their agent to see shared expenses but not your individual spending. Now your accountant's agent needs read-only access to everything, but only during tax season.
+In async execution, the model fires off a tool call, gets back an ID, and keeps working. When the result arrives later, the model correlates by ID. This means the model has to *remember* an identifier across multiple turns of conversation.
 
-This is not a prompt engineering problem. This is a systems engineering problem. You need:
+We used UUIDs. `f47ac10b-58cc-4372-a567-0e02b2c3d479`. Standard engineering practice. The model couldn't reproduce them — it would get close, off by one hex digit, and the runtime would silently drop the correlation. 5% of async flows failed this way.
 
-1. **Scoped delegation tokens** — Agent A can grant Agent B access to specific fields, with an expiry
-2. **Field-level access control** — Not just "can read" but "can read these specific properties"
-3. **Audit trails** — Who accessed what, when, through which agent
-4. **Revocability** — Instantly cut off an agent's access
+```typescript
+// Fragile: model hallucinates hex characters
+{ tool_call_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479" }
 
-We're basically reinventing RBAC and OAuth for a world where the "users" are AI models. And honestly? The patterns from the last 20 years of web development apply surprisingly well — they just need to be adapted for non-human actors.
+// Robust: model can count
+{ tool_call_id: 3 }
+```
 
-## The MCP bet
+Incremental integers fixed it instantly. The broader lesson: **design your agent protocols for how models actually manage state** — structure and sequence, not arbitrary token recall. Every interface between the runtime and the model is a potential hallucination surface. Keep those surfaces small.
 
-One pattern I'm bullish on is MCP (Model Context Protocol). The idea is simple: instead of every agent framework inventing its own tool-calling convention, you standardize it. Agent connects to an MCP server, discovers available tools, and interacts through a common protocol.
+## Problem 2: What to do while you wait
 
-It's like how REST APIs standardized web services. Or how LSP standardized IDE language support. Once you have a protocol, you get composability for free.
+When the model needs the result of tool call #2 but it hasn't arrived yet, you have a choice. Block and wait? Or let the model keep going and correct when the real data arrives?
 
-The interesting question is: what sits behind the MCP server? Right now, most implementations are thin wrappers around existing APIs. But I think the real value is in **structured data objects** that are MCP-native — objects that were *designed* to be discovered, queried, and mutated by agents, with schemas, logic, and permissions baked in.
+We went with optimistic execution. The model proceeds with its best guess, and when the real result lands, it adjusts. The correction loop is surprisingly robust. In practice, we inject a system marker when a result arrives that may contradict earlier reasoning: `[Note: tool #2 returned X — update any prior assumptions accordingly]`. It's not elegant, but models respond well to explicit correction cues.
 
-## What I'm watching
+**The cost of waiting is almost always higher than the cost of occasional correction.** A model that moves forward feels fast. A model that blocks feels broken.
 
-Three things I'm paying attention to over the next 6 months:
+The caveat: optimistic execution is wrong for irreversible operations. The runtime needs to know the difference:
 
-1. **Schema languages for agents** — Will something emerge as the "SQL for agent data"? Or will everyone just use JSON Schema / Zod and call it a day?
+```typescript
+const tools = {
+  web_search:  { handler: search, reversible: true  },  // optimistic OK
+  send_email:  { handler: send,   reversible: false },  // must block
+  db_write:    { handler: write,  reversible: false },  // must block
+};
+```
 
-2. **Multi-agent coordination** — What happens when two agents try to modify the same resource? We solved this for databases (transactions, MVCC). We haven't solved it for agent workflows.
+For reversible tools, dispatch and continue. For irreversible ones, the model explicitly waits. Don't learn this the hard way.
 
-3. **The IDE as agent interface** — This is a JetBrains bias, but I genuinely think the developer IDE is an underrated surface for agent interaction. Developers already live there. Agents should too.
+## Problem 3: Cancellation (and a race condition)
 
-## The uncomfortable truth
+Once you have multiple async operations in flight, the model routinely realizes one of them is no longer relevant. An earlier result made a later query pointless. The user changed their mind. You need a way to abort.
 
-Here's the uncomfortable truth about AI agents in 2026: the models are good enough. They've been good enough for a while. What's missing is everything *around* the model — the runtime, the data layer, the permission system, the protocol.
+```typescript
+{ tool: "cancel", args: { tool_call_id: 3, reason: "user changed query" } }
+```
 
-It's not a model problem. It's an infrastructure problem.
+Without this, stale results pollute the context. With it, the model actively manages its own execution — drops dead-end paths, conserves context window, stays focused.
 
-And infrastructure problems are my favorite kind.
+But there's a race condition nobody warns you about: the model emits `cancel(3)` while tool 3's result is already in flight. The runtime processes the cancel, marks it done, then the result arrives. Deliver it? Discard it? We went with discard-and-log — if the model decided to cancel, it's already moved on, and injecting an unexpected result causes more confusion than help. But you *must* log it. Silent discards are debugging nightmares.
 
----
+## Problem 4: You can't debug what you can't see
 
-*If you're thinking about similar problems, I'd love to hear from you. Find me on [GitHub](https://github.com/BezzubovEgor) or [Telegram](https://t.me/ybezzubau).*
+This is where teams spend the most time and have the worst tooling. In a sync agent, you read the trace top to bottom. In an async agent, everything interleaves:
+
+```
+┌─ Turn 1 ─────────────────────────────────────────────────────────┐
+│ Model: "I'll search for the docs and check the API status"       │
+│ → dispatch tool #1: web_search("project X docs")     [PENDING]   │
+│ → dispatch tool #2: http_get("api.example.com/status") [PENDING] │
+│ Pending: [#1, #2]                                                │
+├─ Turn 2 ─────────────────────────────────────────────────────────┤
+│ ← tool #2 completed: { status: "degraded", latency: 2400ms }    │
+│ Pending: [#1]                                                    │
+│ Model: "API is degraded. Let me also check the status page..."   │
+│ → dispatch tool #3: web_search("project X status page") [PENDING]│
+│ Pending: [#1, #3]                                                │
+├─ Turn 3 ─────────────────────────────────────────────────────────┤
+│ ← tool #1 completed: { results: [...docs links...] }            │
+│ Pending: [#3]                                                    │
+│ Model: "Found the docs. The status page search is redundant now."│
+│ → cancel tool #3: "docs already contain status info"             │
+│ Pending: []                                                      │
+│ ← tool #3 result arrived (DISCARDED — already cancelled)         │
+│ Model: "Here's what I found: ..."                                │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Every turn shows the full async state: what's pending, what just completed, what the model knew versus what was still in flight. You can see tool #2 returning before tool #1, tool #3 being dispatched and then cancelled, and the late-arriving result being discarded. This trace has all four problems I've described in a single three-turn interaction.
+
+Without this view, debugging is like debugging a concurrent program with only `print()`. Technically possible. Practically maddening.
+
+## Build the trace viewer first
+
+I used to think building an agent meant starting with the prompt chain and tool definitions. I was wrong.
+
+The first thing I'd build in any new agent system is the async trace viewer. Before the tools, before the prompts, before the model integration. You can iterate on prompts in minutes. You can swap models in an afternoon. But you cannot fix what you cannot see, and in an async agent, you can't see anything by default.
+
+Agents are not chatbots with extra steps. They're concurrent systems that happen to use an LLM as their scheduler. The model is the part that gets all the attention. The runtime is the part that determines whether it actually works.
